@@ -158,53 +158,29 @@ async def process_pending_requests(bot_id: str) -> None:
         await session.commit()
 
 
-async def on_startup(bots: Dict[str, Bot]) -> None:
-    """Startup handler."""
-    global scheduler, _bots
-    logger.info("Starting CartaMe bots...")
-
+def start_scheduler(bots: Dict[str, Bot]) -> AsyncIOScheduler:
+    """Start the background scheduler."""
+    global _bots
     _bots = bots
-    bot_ids = list(bots.keys())
 
-    # Initialize databases
-    await init_databases(bot_ids)
-
-    # Initialize defaults for each bot
-    for bot_id in bot_ids:
-        await init_defaults(bot_id)
-        await process_pending_requests(bot_id)
-
-    # Initialize default AI providers (shared)
-    await init_default_ai_providers()
-
-    # Start scheduler for background tasks
-    scheduler = AsyncIOScheduler()
-    scheduler.add_job(
+    sched = AsyncIOScheduler()
+    sched.add_job(
         auto_return_ai,
         "interval",
         minutes=1,
         id="auto_return_ai",
         replace_existing=True
     )
-    scheduler.add_job(
+    sched.add_job(
         cleanup_expired_claims,
         "interval",
         minutes=5,
         id="cleanup_claims",
         replace_existing=True
     )
-    scheduler.start()
+    sched.start()
     logger.info("Background scheduler started")
-
-    # Log bot info
-    for bot_id, bot in bots.items():
-        try:
-            me = await bot.get_me()
-            logger.info(f"{bot_id}: @{me.username} ({me.id})")
-        except Exception as e:
-            logger.error(f"Failed to get info for {bot_id}: {e}")
-
-    logger.info("All bots started successfully")
+    return sched
 
 
 async def on_shutdown(bots: Dict[str, Bot]) -> None:
@@ -230,6 +206,8 @@ async def on_shutdown(bots: Dict[str, Bot]) -> None:
 
 async def main() -> None:
     """Main entry point."""
+    global scheduler
+
     # Validate configuration
     if not settings.bot1_token:
         logger.error("BOT1_TOKEN is required")
@@ -241,9 +219,27 @@ async def main() -> None:
 
     # Get configured bots
     tokens = get_bot_tokens()
-    logger.info(f"Configured bots: {list(tokens.keys())}")
+    bot_ids = list(tokens.keys())
+    logger.info(f"Configured bots: {bot_ids}")
 
-    # Create bot instances
+    # ========================================
+    # INITIALIZE DATABASES BEFORE CREATING BOTS
+    # ========================================
+    logger.info("Initializing databases...")
+    await init_databases(bot_ids)
+
+    # Initialize defaults for each bot
+    for bot_id in bot_ids:
+        await init_defaults(bot_id)
+        await process_pending_requests(bot_id)
+
+    # Initialize default AI providers (shared)
+    await init_default_ai_providers()
+    logger.info("Database initialization complete")
+
+    # ========================================
+    # NOW CREATE BOT INSTANCES
+    # ========================================
     bots: Dict[str, Bot] = {}
     dispatchers: Dict[str, Dispatcher] = {}
 
@@ -257,10 +253,18 @@ async def main() -> None:
             logger.error(f"Failed to create {bot_id}: {e}")
             sys.exit(1)
 
-    # Register startup/shutdown handlers
-    for bot_id, dp in dispatchers.items():
-        dp.startup.register(lambda: on_startup(bots))
-        dp.shutdown.register(lambda: on_shutdown(bots))
+    # Log bot info
+    for bot_id, bot in bots.items():
+        try:
+            me = await bot.get_me()
+            logger.info(f"{bot_id}: @{me.username} ({me.id})")
+        except Exception as e:
+            logger.error(f"Failed to get info for {bot_id}: {e}")
+
+    # Start scheduler
+    scheduler = start_scheduler(bots)
+
+    logger.info("All bots initialized, starting polling...")
 
     try:
         # Start all bots

@@ -5,6 +5,7 @@ from typing import Any, Awaitable, Callable, Dict
 from aiogram import BaseMiddleware
 from aiogram.types import TelegramObject, Update
 from sqlalchemy import select
+from sqlalchemy.exc import ProgrammingError
 
 from database.base import get_bot_session_factory, get_shared_session_factory
 from database.models import BotConfig
@@ -37,12 +38,22 @@ class DatabaseMiddleware(BaseMiddleware):
                 data["bot_session"] = bot_session
                 data["shared_session"] = shared_session
 
-                # Get support_group_id from config
-                result = await bot_session.execute(
-                    select(BotConfig).where(BotConfig.key == "support_group_id")
-                )
-                config = result.scalar_one_or_none()
-                data["support_group_id"] = int(config.value) if config and config.value else None
+                # Get support_group_id from config (with error handling for missing tables)
+                support_group_id = None
+                try:
+                    result = await bot_session.execute(
+                        select(BotConfig).where(BotConfig.key == "support_group_id")
+                    )
+                    config = result.scalar_one_or_none()
+                    if config and config.value:
+                        support_group_id = int(config.value)
+                except ProgrammingError:
+                    # Table doesn't exist yet, will be created on startup
+                    logger.debug("bot_config table not ready yet")
+                except Exception as e:
+                    logger.warning(f"Error getting support_group_id: {e}")
+
+                data["support_group_id"] = support_group_id
 
                 try:
                     result = await handler(event, data)
